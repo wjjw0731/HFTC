@@ -5,6 +5,7 @@ import joblib
 import logging
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, matthews_corrcoef
 import warnings
+from typing import Optional
 
 warnings.filterwarnings("ignore")
 
@@ -27,7 +28,7 @@ class HierarchicalClassification:
             data = [json.loads(line) for line in file]
         return pd.DataFrame(data)
 
-    def predict_and_evaluate(self, model_name, data, features, label_column, result_column):
+    def predict_and_evaluate(self, model_name, data, features, label_column, result_column, proba):
         """
         Load models, make predictions, calculate accuracy, and dynamically set results based on confidence
         :param model_name: The name of the model file
@@ -44,17 +45,19 @@ class HierarchicalClassification:
 
         y = data[label_column]
         y_pred = model.predict(X)
-
-        if hasattr(model, "predict_proba"):
-            proba = model.predict_proba(X)
-            max_confidence = proba.max(axis=1)
-            confidence_threshold = 5 * (1 / data[label_column].nunique())
-            y_pred = [pred if conf >= confidence_threshold else 'unknown' for pred, conf in zip(y_pred, max_confidence)]
+        if proba == None:
+            accuracy = accuracy_score(y, y_pred)        
         else:
-            logging.warning(f"Model {model_name} does not support predict_proba. Falling back to normal predict.")
-
-        valid_mask = [pred != 'unknown' for pred in y_pred]
-        accuracy = accuracy_score(y[valid_mask], [pred for pred, valid in zip(y_pred, valid_mask) if valid])
+            if hasattr(model, "predict_proba"):
+                pre_proba = model.predict_proba(X)
+                max_confidence = pre_proba.max(axis=1)
+                confidence_threshold = proba
+                y_pred = [pred if conf >= confidence_threshold else 'unknown' for pred, conf in zip(y_pred, max_confidence)]
+            else:
+                logging.warning(f"Model {model_name} does not support predict_proba. Falling back to normal predict.")
+    
+            valid_mask = [pred != 'unknown' for pred in y_pred]
+            accuracy = accuracy_score(y[valid_mask], [pred for pred, valid in zip(y_pred, valid_mask) if valid])
         logging.info(f"Accuracy for {model_name}: {accuracy:.4f}")
 
         data[result_column] = y_pred
@@ -74,10 +77,10 @@ class HierarchicalClassification:
                 lambda row: row[col] if row[label_column] == row[prediction_column] else 'unknown', axis=1)
         return data
 
-    def classify_ascomycota(self, data):
+    def classify_ascomycota(self, data, proba):
         """ Ascomycota """
         ascomycota_data = self.predict_and_evaluate('Ascomycota_p2c.pkl', data, ['seq_vector10', 'backseq_vector10'],
-                                                    'c', 'pre_c')
+                                                    'c', 'pre_c', proba=proba)
         ascomycota_groups = {c: df for c, df in ascomycota_data.groupby('pre_c')}
 
         results = []
@@ -90,7 +93,7 @@ class HierarchicalClassification:
         }.items():
             df = ascomycota_groups.get(class_label, pd.DataFrame())
             if not df.empty:
-                df = self.predict_and_evaluate(model_name, df, ['seq_vector7', 'backseq_vector7'], 's', 'pre_s')
+                df = self.predict_and_evaluate(model_name, df, ['seq_vector7', 'backseq_vector7'], 's', 'pre_s', proba=proba)
                 df = self.insert_prediction_columns(df, 's', 'pre_s', ['o', 'f', 'g'])
                 results.append(df)
 
@@ -99,20 +102,20 @@ class HierarchicalClassification:
         ]])
         if not other_data.empty:
             other_data = self.predict_and_evaluate('Ascomycota_p_other_c2s.pkl', other_data,
-                                                   ['seq_vector7', 'backseq_vector7'], 's', 'pre_s')
+                                                   ['seq_vector7', 'backseq_vector7'], 's', 'pre_s', proba=proba)
             other_data = self.insert_prediction_columns(other_data, 's', 'pre_s', ['o', 'f', 'g'])
             results.append(other_data)
 
         return pd.concat(results)
 
-    def classify_basidiomycota(self, data):
+    def classify_basidiomycota(self, data, proba):
         """Basidiomycota"""
         results = []
 
         # Step 1: p -> c
         basidiomycota_data = self.predict_and_evaluate(
             'Basidiomycota_p2c.pkl', data,
-            ['seq_vector10', 'backseq_vector10'], 'c', 'pre_c'
+            ['seq_vector10', 'backseq_vector10'], 'c', 'pre_c', proba=proba
         )
         basidiomycota_groups = basidiomycota_data.groupby('pre_c')
 
@@ -123,7 +126,7 @@ class HierarchicalClassification:
             # c -> o
             agaricomycetes_data = self.predict_and_evaluate(
                 'Basidiomycota_p_Agaricomycetes_c2o.pkl', agaricomycetes_data,
-                ['seq_vector10', 'backseq_vector10'], 'o', 'pre_o'
+                ['seq_vector10', 'backseq_vector10'], 'o', 'pre_o', proba=proba
             )
             agaricomycetes_orders = agaricomycetes_data.groupby('pre_o')
 
@@ -133,7 +136,7 @@ class HierarchicalClassification:
                     # Step 3-1: Agaricales 需要先进行 o -> f 分类
                     order_data = self.predict_and_evaluate(
                         'Basidiomycota_p_Agaricomycetes_c_Agaricales_o2f.pkl', order_data,
-                        ['seq_vector10', 'backseq_vector10'], 'f', 'pre_f'
+                        ['seq_vector10', 'backseq_vector10'], 'f', 'pre_f', proba=proba
                     )
                     families = order_data.groupby('pre_f')
 
@@ -142,7 +145,7 @@ class HierarchicalClassification:
                         cortinariaceae_data = families.get_group('Cortinariaceae')
                         cortinariaceae_data = self.predict_and_evaluate(
                             'Basidiomycota_p_Agaricomycetes_c_Agaricales_o_Cortinariaceae_f2s.pkl',
-                            cortinariaceae_data, ['seq_vector7', 'backseq_vector7'], 's', 'pre_s'
+                            cortinariaceae_data, ['seq_vector7', 'backseq_vector7'], 's', 'pre_s', proba=proba
                         )
                         cortinariaceae_data = self.insert_prediction_columns(cortinariaceae_data, 's', 'pre_s', ['g'])
                         results.append(cortinariaceae_data)
@@ -152,7 +155,7 @@ class HierarchicalClassification:
                         inocybaceae_data = families.get_group('Inocybaceae')
                         inocybaceae_data = self.predict_and_evaluate(
                             'Basidiomycota_p_Agaricomycetes_c_Agaricales_o_Inocybaceae_f2s.pkl',
-                            inocybaceae_data, ['seq_vector7', 'backseq_vector7'], 's', 'pre_s'
+                            inocybaceae_data, ['seq_vector7', 'backseq_vector7'], 's', 'pre_s', proba=proba
                         )
                         inocybaceae_data = self.insert_prediction_columns(inocybaceae_data, 's', 'pre_s', ['g'])
                         results.append(inocybaceae_data)
@@ -176,7 +179,7 @@ class HierarchicalClassification:
                         other1_data = pd.concat(other1_families)
                         other1_data = self.predict_and_evaluate(
                             'Basidiomycota_p_Agaricomycetes_c_Agaricales_o_other1_f2s.pkl',
-                            other1_data, ['seq_vector7', 'backseq_vector7'], 's', 'pre_s'
+                            other1_data, ['seq_vector7', 'backseq_vector7'], 's', 'pre_s', proba=proba
                         )
                         other1_data = self.insert_prediction_columns(other1_data, 's', 'pre_s', ['g'])
                         results.append(other1_data)
@@ -186,7 +189,7 @@ class HierarchicalClassification:
                         other2_data = pd.concat(other2_families)
                         other2_data = self.predict_and_evaluate(
                             'Basidiomycota_p_Agaricomycetes_c_Agaricales_o_other2_f2s.pkl',
-                            other2_data, ['seq_vector7', 'backseq_vector7'], 's', 'pre_s'
+                            other2_data, ['seq_vector7', 'backseq_vector7'], 's', 'pre_s', proba=proba
                         )
                         other2_data = self.insert_prediction_columns(other2_data, 's', 'pre_s', ['g'])
                         results.append(other2_data)
@@ -202,7 +205,7 @@ class HierarchicalClassification:
                     if not order_data.empty:
                         order_data = self.predict_and_evaluate(
                             model_name, order_data,
-                            ['seq_vector7', 'backseq_vector7'], 's', 'pre_s'
+                            ['seq_vector7', 'backseq_vector7'], 's', 'pre_s', proba=proba
                         )
                         order_data = self.insert_prediction_columns(order_data, 's', 'pre_s', ['f', 'g'])
                         results.append(order_data)
@@ -217,7 +220,7 @@ class HierarchicalClassification:
                 other_orders_data = pd.concat(other_orders_data)
                 other_orders_data = self.predict_and_evaluate(
                     'Basidiomycota_p_Agaricomycetes_c_other_o2s.pkl', other_orders_data,
-                    ['seq_vector7', 'backseq_vector7'], 's', 'pre_s'
+                    ['seq_vector7', 'backseq_vector7'], 's', 'pre_s', proba=proba
                 )
                 other_orders_data = self.insert_prediction_columns(other_orders_data, 's', 'pre_s', ['f', 'g'])
                 results.append(other_orders_data)
@@ -232,19 +235,19 @@ class HierarchicalClassification:
             other_basidiomycota = pd.concat(other_basidiomycota)
             other_basidiomycota = self.predict_and_evaluate(
                 'Basidiomycota_p_other_c2s.pkl', other_basidiomycota,
-                ['seq_vector7', 'backseq_vector7'], 's', 'pre_s'
+                ['seq_vector7', 'backseq_vector7'], 's', 'pre_s', proba=proba
             )
             other_basidiomycota = self.insert_prediction_columns(other_basidiomycota, 's', 'pre_s', ['o', 'f', 'g'])
             results.append(other_basidiomycota)
 
         return pd.concat(results) if results else pd.DataFrame()
 
-    def classify(self, data_path):
+    def classify(self, data_path, proba: Optional[float]=None):
 
         data = self.load_and_process_data(data_path)
 
         # k2p
-        data = self.predict_and_evaluate('k2p.pkl', data, ['seq_vector10', 'backseq_vector10'], 'p', 'pre_p')
+        data = self.predict_and_evaluate('k2p.pkl', data, ['seq_vector10', 'backseq_vector10'], 'p', 'pre_p', proba=proba)
 
         # data_group
         partitioned_data = {p: df for p, df in data.groupby('pre_p')}
@@ -255,16 +258,16 @@ class HierarchicalClassification:
         # other_p2s
         if not other_data.empty:
             other_data = self.predict_and_evaluate('other_p2s.pkl', other_data, ['seq_vector7', 'backseq_vector7'], 's',
-                                                   'pre_s')
+                                                   'pre_s', proba=proba)
             other_data = self.insert_prediction_columns(other_data, 's', 'pre_s', ['c', 'o', 'f', 'g'])
 
         #  Ascomycota
         if not ascomycota_data.empty:
-            ascomycota_data = self.classify_ascomycota(ascomycota_data)
+            ascomycota_data = self.classify_ascomycota(ascomycota_data, proba=proba)
 
         #  Basidiomycota
         if not basidiomycota_data.empty:
-            basidiomycota_data = self.classify_basidiomycota(basidiomycota_data)
+            basidiomycota_data = self.classify_basidiomycota(basidiomycota_data, proba=proba)
 
         # result_concat
         result = pd.concat([other_data, ascomycota_data, basidiomycota_data], axis=0).sort_index()
@@ -315,6 +318,8 @@ def main():
     parser = argparse.ArgumentParser(description="Hierarchical Classification Tool")
     parser.add_argument('--classify', type=str, help="Path to the input data for classification")
     parser.add_argument('--metrics', type=str, help="Path to the classification result for metrics calculation")
+    parser.add_argument('--proba', type=float, default=None,
+                    help="Optional probability threshold for classification confidence (e.g., 0.8)")
     parser.add_argument('--output', type=str, default="metrics.csv", help="Path to save the metrics output")
     args = parser.parse_args()
 
